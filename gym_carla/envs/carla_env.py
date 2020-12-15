@@ -10,6 +10,7 @@ from __future__ import division
 import copy
 import numpy as np
 import pygame
+import torch
 import random
 import time
 from skimage.transform import resize
@@ -17,6 +18,22 @@ from skimage.transform import resize
 import gym
 from gym import spaces
 from gym.utils import seeding
+import sys, os, glob
+
+try:
+    sys.path.append(
+        glob.glob(
+            'dist/carla-*%d.%d-%s.egg'
+            % (  # TODO find a solution for a general way to find this path!
+                sys.version_info.major,
+                sys.version_info.minor,
+                "win-amd64" if os.name == "nt" else "linux-x86_64",
+            )
+        )[0]
+    )
+except IndexError:
+    pass
+
 import carla
 
 from gym_carla.envs.render import BirdeyeRender
@@ -82,11 +99,13 @@ class CarlaEnv(gym.Env):
         'pixor_state': spaces.Box(np.array([-1000, -1000, -1, -1, -5]), np.array([1000, 1000, 1, 1, 20]), dtype=np.float32)
         })
     self.observation_space = spaces.Dict(observation_space_dict)
-
+    print(self.observation_space)
+    
     # Connect to carla server and get world object
     print('connecting to Carla server...')
     client = carla.Client('localhost', params['port'])
     client.set_timeout(10.0)
+    # Sometimes carla fail to load the world, just restart the training.
     self.world = client.load_world(params['town'])
     print('Carla server connected!')
 
@@ -137,7 +156,7 @@ class CarlaEnv(gym.Env):
     # Record the time of total steps and resetting steps
     self.reset_step = 0
     self.total_step = 0
-    
+
     # Initialize the renderer
     self._init_renderer()
 
@@ -147,8 +166,10 @@ class CarlaEnv(gym.Env):
       x, y = x.flatten(), y.flatten()
       self.pixel_grid = np.vstack((x, y)).T
 
+
   def reset(self):
-    # Clear sensor objects  
+
+    # Clear sensor objects, from here we have the warnings on each episode 
     self.collision_sensor = None
     self.lidar_sensor = None
     self.camera_sensor = None
@@ -232,7 +253,7 @@ class CarlaEnv(gym.Env):
     self.camera_sensor = self.world.spawn_actor(self.camera_bp, self.camera_trans, attach_to=self.ego)
     self.camera_sensor.listen(lambda data: get_camera_img(data))
     def get_camera_img(data):
-      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
+      array = np.frombuffer(data.raw_data, dtype=np.dtype("uint8"))
       array = np.reshape(array, (data.height, data.width, 4))
       array = array[:, :, :3]
       array = array[:, :, ::-1]
@@ -333,8 +354,8 @@ class CarlaEnv(gym.Env):
     """Initialize the birdeye view renderer.
     """
     pygame.init()
-    self.display = pygame.display.set_mode(
-    (self.display_size * 3, self.display_size),
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    self.display = pygame.display.set_mode((self.display_size * 3, self.display_size),
     pygame.HWSURFACE | pygame.DOUBLEBUF)
 
     pixels_per_meter = self.display_size / self.obs_range
@@ -478,7 +499,7 @@ class CarlaEnv(gym.Env):
       self.birdeye_render.render(self.display, roadmap_render_types)
       roadmap = pygame.surfarray.array3d(self.display)
       roadmap = roadmap[0:self.display_size, :, :]
-      roadmap = display_to_rgb(roadmap, self.obs_size)
+      #roadmap = display_to_rgb(roadmap, self.obs_size)
       # Add ego vehicle
       for i in range(self.obs_size):
         for j in range(self.obs_size):
@@ -486,8 +507,8 @@ class CarlaEnv(gym.Env):
             roadmap[i, j, :] = birdeye[i, j, :]
 
     # Display birdeye image
-    birdeye_surface = rgb_to_display_surface(birdeye, self.display_size)
-    self.display.blit(birdeye_surface, (0, 0))
+    #birdeye_surface = rgb_to_display_surface(birdeye, self.display_size)
+    #self.display.blit(birdeye_surface, (0, 0))
 
     ## Lidar image generation
     point_cloud = []
@@ -518,17 +539,24 @@ class CarlaEnv(gym.Env):
     lidar = np.rot90(lidar, 1)
     lidar = lidar * 255
 
+    lidar_to_tensor = torch.tensor(lidar, dtype=torch.uint8)
+
     # Display lidar image
-    lidar_surface = rgb_to_display_surface(lidar, self.display_size)
-    self.display.blit(lidar_surface, (self.display_size, 0))
+    #lidar_surface = rgb_to_display_surface(lidar, self.display_size)
+    #self.display.blit(lidar_surface, (self.display_size, 0))
 
     ## Display camera image
     camera = resize(self.camera_img, (self.obs_size, self.obs_size)) * 255
-    camera_surface = rgb_to_display_surface(camera, self.display_size)
-    self.display.blit(camera_surface, (self.display_size * 2, 0))
+    camera_to_tensor = torch.tensor(camera, dtype=torch.uint8)
+    #camera_surface = rgb_to_display_surface(camera, self.display_size)
+    #self.display.blit(camera_surface, (self.display_size * 2, 0))
+
+    #camera = self.sensor_data_to_tensor(self.camera_img, self.lidar_data, 64, 64, torch.device)
+    birdeye_to_tensor = torch.tensor(birdeye, dtype=torch.uint8)
+    img_tensor = np.concatenate((camera_to_tensor, lidar_to_tensor, birdeye_to_tensor), axis=2)#torch.cat([camera_to_tensor, lidar_to_tensor], dim=2)
 
     # Display on pygame
-    pygame.display.flip()
+    #pygame.display.flip()
 
     # State observation
     ego_trans = self.ego.get_transform()
@@ -579,7 +607,7 @@ class CarlaEnv(gym.Env):
       pixor_state = [ego_x, ego_y, np.cos(ego_yaw), np.sin(ego_yaw), speed]
 
     obs = {
-      'camera':camera.astype(np.uint8),
+      'camera':img_tensor.astype(np.uint8),
       'lidar':lidar.astype(np.uint8),
       'birdeye':birdeye.astype(np.uint8),
       'state': state,
@@ -639,7 +667,7 @@ class CarlaEnv(gym.Env):
     ego_x, ego_y = get_pos(self.ego)
 
     # If collides
-    if len(self.collision_hist)>0: 
+    if len(self.collision_hist)>0:
       return True
 
     # If reach maximum timestep
