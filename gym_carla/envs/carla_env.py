@@ -98,8 +98,6 @@ class CarlaEnv(gym.Env):
         'vh_regr': spaces.Box(low=-5, high=5, shape=(self.pixor_size, self.pixor_size, 6), dtype=np.float32),
         'pixor_state': spaces.Box(np.array([-1000, -1000, -1, -1, -5]), np.array([1000, 1000, 1, 1, 20]), dtype=np.float32)
         })
-    self.observation_space = spaces.Dict(observation_space_dict)
-    print(self.observation_space)
     
     # Connect to carla server and get world object
     print('connecting to Carla server...')
